@@ -1,0 +1,98 @@
+/**
+ * Aiven Brand 2.0 — dark theme tokens.
+ *
+ * Values are the RESOLVED semantic tokens from the design system's dark theme,
+ * lifted from its compiled output rather than eyeballed. Product UI uses these,
+ * not the marketing brand palette.
+ *
+ * One deliberate deviation, marked below: the dark theme maps success text to
+ * success-90 (#008E00), which is unreadable on a #19191D ground. Success on
+ * dark uses success-40 instead. Raised with the design-system owners.
+ */
+
+:root {
+  /* ── surfaces (grey scale: 100 = darkest) ───────────────────────── */
+  --bg-body: #19191d;          /* grey-100 */
+  --bg-layer: #292a31;         /* grey-90  */
+  --bg-surface: #3a3a44;       /* grey-80  */
+  --bg-raised: #1f1f24;        /* between body and layer, for the composer */
+  --bg-sunken: #17171b;        /* log panes, table headers */
+
+  /* ── borders ────────────────────────────────────────────────────── */
+  --border-muted: #5a5b6a;     /* grey-60 */
+  --border-default: #9696a0;   /* grey-40 */
+  --border-subtle: #292a31;    /* grey-90, for hairlines on the body */
+
+  /* ── text ───────────────────────────────────────────────────────── */
+  --text-intense: #f7f7fa;     /* grey-0  */
+  --text-default: #b4b4bb;     /* grey-30 */
+  --text-muted: #787885;       /* grey-50 */
+  --text-inactive: #4a4b57;    /* grey-70 */
+
+  /* ── interactive (primary = indigo, per the token system) ────────── */
+  --primary: #818eec;          /* primary-60 */
+  --primary-intense: #b9c5ef;  /* primary-40 */
+  --primary-deep: #222f95;     /* primary-90 */
+
+  /* ── status ─────────────────────────────────────────────────────── */
+  /* success-40, NOT the theme's success-90: that is #008E00 and fails
+     contrast on this background. */
+  --success: #60db57;
+  --warning: #ffb300;          /* warning-70 */
+  --danger: #ed7975;           /* error-30   */
+  --info: #0399e3;             /* info-70    */
+
+  /* ── brand accents (Teal leads in the customer interface) ────────── */
+  --teal: #2ed0cd;
+  --teal-bright: #75e6e4;
+  --green: #5ffa74;
+
+  /* ── product colours ────────────────────────────────────────────── */
+  --product-pg: #6f64ff;
+  --product-kafka: #df56f2;
+  --product-clickhouse: #fdcd12;
+  --product-opensearch: #59d2f4;
+  --product-mysql: #75e6e4;
+  --product-valkey: #8a8aff;
+  --product-apps: #f85149;
+  --product-grafana: #ff965e;
+
+  /* ── type ───────────────────────────────────────────────────────── */
+  --font-display: "Funnel Display", Impact, "Arial Narrow Bold", sans-serif;
+  --font-body: Inter, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --text-xs: 0.75rem;    --lh-xs: 1rem;
+  --text-sm: 0.875rem;   --lh-sm: 1.25rem;
+  --text-base: 1rem;     --lh-base: 1.5rem;
+  --text-lg: 1.125rem;   --lh-lg: 1.75rem;
+  --text-xl: 1.25rem;    --lh-xl: 1.75rem;
+  --text-2xl: 1.5rem;    --lh-2xl: 2rem;
+
+  /* ── spacing ────────────────────────────────────────────────────── */
+  /* The app bar's height, needed by any screen that has to fill exactly the
+     rest of the viewport rather than growing past it. */
+  --app-bar-h: 56px;
+
+  --s-1: 2px;  --s-2: 4px;  --s-3: 8px;  --s-4: 12px;
+  --s-5: 16px; --s-6: 24px; --s-7: 32px; --s-8: 40px; --s-9: 48px;
+
+  /* ── radii ──────────────────────────────────────────────────────── */
+  --r-sm: 2px; --r-default: 4px; --r-md: 6px;
+  --r-lg: 8px; --r-xl: 12px; --r-full: 9999px;
+
+  /* ── elevation ──────────────────────────────────────────────────── */
+  --shadow-2dp: 0 2px 4px rgba(5, 8, 15, 0.24), 0 1px 2px rgba(5, 8, 15, 0.24);
+  --shadow-4dp: 0 4px 8px rgba(5, 8, 15, 0.28), 0 2px 4px rgba(5, 8, 15, 0.28);
+  --shadow-16dp: 0 16px 32px rgba(5, 8, 15, 0.45), 0 8px 16px rgba(5, 8, 15, 0.35);
+  --shadow-24dp: 0 24px 48px rgba(5, 8, 15, 0.55), 0 12px 24px rgba(5, 8, 15, 0.4);
+
+  /* ── motion ─────────────────────────────────────────────────────── */
+  --ease: cubic-bezier(0.2, 0, 0.2, 1);
+  --dur-fast: 120ms;
+  --dur: 200ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --dur-fast: 0ms; --dur: 0ms; }
+}

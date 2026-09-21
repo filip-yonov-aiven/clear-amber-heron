@@ -1,0 +1,384 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{ app_name }}</title>
+  <link rel="stylesheet" href="/static/tokens.css" />
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg-body);
+      color: var(--text-default);
+      font-family: var(--font-body);
+      font-size: var(--text-base);
+      line-height: var(--lh-base);
+    }
+    main {
+      max-width: 860px;
+      margin: 0 auto;
+      padding: var(--s-7) var(--s-6);
+    }
+    h1 {
+      font-family: var(--font-display);
+      color: var(--text-intense);
+      font-size: var(--text-2xl);
+      margin: 0 0 var(--s-2) 0;
+    }
+    p.intent {
+      color: var(--text-muted);
+      font-size: var(--text-sm);
+      margin: 0 0 var(--s-6) 0;
+    }
+    .chips { display: flex; gap: var(--s-3); margin-bottom: var(--s-7); flex-wrap: wrap; }
+    .chip {
+      display: flex;
+      align-items: center;
+      gap: var(--s-2);
+      background: var(--bg-layer);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--r-full);
+      padding: var(--s-2) var(--s-4);
+      font-family: var(--font-mono);
+      font-size: var(--text-xs);
+      color: var(--text-default);
+    }
+    section {
+      background: var(--bg-raised);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--r-lg);
+      padding: var(--s-6);
+      margin-bottom: var(--s-6);
+    }
+    h2 {
+      font-size: var(--text-lg);
+      color: var(--text-intense);
+      margin: 0 0 var(--s-4) 0;
+    }
+    h3 {
+      font-size: var(--text-base);
+      color: var(--text-intense);
+      margin: var(--s-5) 0 var(--s-3) 0;
+    }
+    .back { display: inline-block; margin-bottom: var(--s-4); color: var(--primary); text-decoration: none; font-size: var(--text-sm); }
+    .back:hover { text-decoration: underline; }
+    .meta { color: var(--text-muted); font-size: var(--text-sm); margin: 0 0 var(--s-4) 0; }
+    .badge {
+      display: inline-block;
+      font-family: var(--font-mono);
+      font-size: var(--text-xs);
+      padding: var(--s-1) var(--s-3);
+      border-radius: var(--r-full);
+      border: 1px solid var(--border-muted);
+      color: var(--text-muted);
+      margin-right: var(--s-2);
+    }
+    .badge.active { color: var(--success); border-color: var(--success); }
+    .badge.on_hold { color: var(--warning); border-color: var(--warning); }
+    .badge.ended { color: var(--danger); border-color: var(--danger); }
+    .badge.done { color: var(--success); border-color: var(--success); }
+    .badge.todo, .badge.scheduled { color: var(--info); border-color: var(--info); }
+    .badge.in_progress { color: var(--warning); border-color: var(--warning); }
+    .badge.advising { color: var(--product-pg); border-color: var(--product-pg); }
+    .badge.board { color: var(--product-grafana); border-color: var(--product-grafana); }
+    .badge.consulting { color: var(--product-clickhouse); border-color: var(--product-clickhouse); }
+    .badge.recurring { color: var(--product-valkey); border-color: var(--product-valkey); }
+    .badge.adhoc { color: var(--product-mysql); border-color: var(--product-mysql); }
+    .badge.quoted { color: var(--info); border-color: var(--info); }
+    .badge.invoiced { color: var(--warning); border-color: var(--warning); }
+    .badge.paid { color: var(--success); border-color: var(--success); }
+    .card {
+      background: var(--bg-layer);
+      border: 1px solid var(--border-subtle);
+      border-radius: var(--r-md);
+      padding: var(--s-4) var(--s-5);
+      margin-bottom: var(--s-3);
+    }
+    .card .title { color: var(--text-intense); font-weight: 600; }
+    .card .sub { color: var(--text-muted); font-size: var(--text-sm); margin-top: var(--s-1); }
+    .card .row { display: flex; align-items: center; justify-content: space-between; gap: var(--s-4); }
+    .card .actions { display: flex; gap: var(--s-2); align-items: center; }
+    .counts { color: var(--text-muted); font-size: var(--text-sm); margin-top: var(--s-2); }
+    form { display: flex; flex-wrap: wrap; gap: var(--s-3); align-items: center; }
+    form.inline { display: inline; }
+    input[type="text"], input[type="date"], input[type="number"], select, textarea {
+      background: var(--bg-sunken);
+      border: 1px solid var(--border-muted);
+      border-radius: var(--r-default);
+      color: var(--text-intense);
+      padding: var(--s-2) var(--s-3);
+      font-family: var(--font-body);
+      font-size: var(--text-sm);
+    }
+    input[type="text"], input[type="date"], input[type="number"] { flex: 1; min-width: 120px; }
+    textarea { width: 100%; min-height: 60px; }
+    select { flex: 0 0 auto; }
+    button {
+      background: var(--primary-deep);
+      color: var(--text-intense);
+      border: 1px solid var(--primary);
+      border-radius: var(--r-default);
+      padding: var(--s-2) var(--s-4);
+      font-family: var(--font-body);
+      font-size: var(--text-sm);
+      cursor: pointer;
+    }
+    button:hover { background: var(--primary); }
+    button.danger { background: transparent; border-color: var(--danger); color: var(--danger); }
+    button.danger:hover { background: var(--danger); color: var(--text-intense); }
+    button.small { padding: var(--s-1) var(--s-3); font-size: var(--text-xs); }
+    .empty { color: var(--text-muted); font-size: var(--text-sm); }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s-4); }
+    @media (max-width: 700px) { .grid { grid-template-columns: 1fr; } }
+    .wipe-note { color: var(--danger); font-size: var(--text-xs); margin-top: var(--s-2); }
+    #health-badge {
+      font-family: var(--font-mono);
+      font-size: var(--text-xs);
+      padding: var(--s-1) var(--s-3);
+      border-radius: var(--r-full);
+      border: 1px solid var(--border-muted);
+      color: var(--text-muted);
+    }
+    #health-badge[data-status="ok"] { color: var(--success); border-color: var(--success); }
+    #health-badge[data-status="degraded"] { color: var(--danger); border-color: var(--danger); }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>{{ app_name }}</h1>
+    <p class="intent">Built from: {{ user_intent }}</p>
+    <div class="chips">
+      {% for svc in services %}
+      <span class="chip">{{ svc.type }} · {{ svc.name }}</span>
+      {% endfor %}
+      <span id="health-badge" data-status="unknown">checking…</span>
+    </div>
+
+    {% if view == "dashboard" %}
+    <section>
+      <h2>Engagements</h2>
+      <p class="meta">Advising, board and consulting work — each with its own recurring and ad-hoc calls, offline deliverables, contacts, fees and notes. All sensitive fields are encrypted at rest.</p>
+
+      {% if engagements %}
+        {% for e in engagements %}
+        <div class="card">
+          <div class="row">
+            <div>
+              <span class="title">{{ e.name }}</span>
+              <div class="sub">{{ e.client }} · {{ e.kind }}</div>
+              <div class="counts">{{ e.open_calls }} open call{{ 's' if e.open_calls != 1 else '' }} · {{ e.open_deliverables }} open deliverable{{ 's' if e.open_deliverables != 1 else '' }}</div>
+            </div>
+            <div class="actions">
+              <span class="badge {{ e.status }}">{{ e.status }}</span>
+              <a href="/engagements/{{ e.id }}"><button class="small">Open</button></a>
+            </div>
+          </div>
+        </div>
+        {% endfor %}
+      {% else %}
+        <p class="empty">No engagements yet.</p>
+      {% endif %}
+    </section>
+
+    <section>
+      <h2>New engagement</h2>
+      <form method="post" action="/engagements">
+        <input type="text" name="name" placeholder="Engagement name" required />
+        <select name="kind" required>
+          <option value="advising">Advising</option>
+          <option value="board">Board</option>
+          <option value="consulting">Consulting</option>
+        </select>
+        <input type="text" name="client" placeholder="Client" />
+        <textarea name="notes" placeholder="Notes (encrypted)"></textarea>
+        <button type="submit">Add engagement</button>
+      </form>
+    </section>
+
+    {% else %}
+
+    <a class="back" href="/">← All engagements</a>
+    <section>
+      <h2>{{ engagement.name }}</h2>
+      <p class="meta">
+        <span class="badge {{ engagement.kind }}">{{ engagement.kind }}</span>
+        <span class="badge {{ engagement.status }}">{{ engagement.status }}</span>
+        Client: {{ engagement.client }}
+        {% if engagement.start_date %} · Started {{ engagement.start_date.strftime('%Y-%m-%d') }}{% endif %}
+        {% if engagement.end_date %} · Ends {{ engagement.end_date.strftime('%Y-%m-%d') }}{% endif %}
+      </p>
+      {% if engagement.notes %}<p class="meta">{{ engagement.notes }}</p>{% endif %}
+
+      <form method="post" action="/engagements/{{ engagement.id }}/wipe" onsubmit="return confirm('Wipe ALL data for this engagement? This permanently deletes every call, deliverable, contact, fee and note. Nothing can be recovered.');">
+        <button type="submit" class="danger">Wipe engagement — delete everything</button>
+      </form>
+      <p class="wipe-note">Discontinuing this engagement? Wiping removes every trace of it from the database.</p>
+    </section>
+
+    <div class="grid">
+      <section>
+        <h2>Calls</h2>
+        <p class="meta">Recurring calls, ad-hoc calls, and quarterly board meetings.</p>
+        {% for c in calls %}
+        <div class="card">
+          <div class="row">
+            <div>
+              <span class="title">{{ c.title }}</span>
+              <div class="sub">
+                <span class="badge {{ c.kind }}">{{ c.kind }}</span>
+                {% if c.frequency %}<span class="badge">{{ c.frequency }}</span>{% endif %}
+                {% if c.next_due %}Next: {{ c.next_due.strftime('%Y-%m-%d') }}{% endif %}
+                {% if c.notes %} · {{ c.notes }}{% endif %}
+              </div>
+            </div>
+            <div class="actions">
+              <span class="badge {{ c.status }}">{{ c.status }}</span>
+              <form class="inline" method="post" action="/calls/{{ c.id }}/toggle">
+                <button type="submit" class="small">{{ 'Reopen' if c.status == 'done' else 'Mark done' }}</button>
+              </form>
+            </div>
+          </div>
+        </div>
+        {% else %}
+        <p class="empty">No calls yet.</p>
+        {% endfor %}
+
+        <h3>Add a call</h3>
+        <form method="post" action="/engagements/{{ engagement.id }}/calls">
+          <select name="kind" required>
+            <option value="recurring">Recurring</option>
+            <option value="adhoc">Ad-hoc</option>
+            <option value="board">Board</option>
+          </select>
+          <input type="text" name="title" placeholder="Call title" required />
+          <select name="frequency">
+            <option value="">Frequency…</option>
+            <option value="weekly">Weekly</option>
+            <option value="monthly">Monthly</option>
+            <option value="quarterly">Quarterly</option>
+          </select>
+          <input type="date" name="next_due" />
+          <textarea name="notes" placeholder="Notes (encrypted)"></textarea>
+          <button type="submit">Add call</button>
+        </form>
+      </section>
+
+      <section>
+        <h2>Deliverables</h2>
+        <p class="meta">Offline work products.</p>
+        {% for d in deliverables %}
+        <div class="card">
+          <div class="row">
+            <div>
+              <span class="title">{{ d.title }}</span>
+              <div class="sub">
+                <span class="badge {{ d.status }}">{{ d.status }}</span>
+                {% if d.due_date %}Due: {{ d.due_date.strftime('%Y-%m-%d') }}{% endif %}
+                {% if d.notes %} · {{ d.notes }}{% endif %}
+              </div>
+            </div>
+            <div class="actions">
+              <form class="inline" method="post" action="/deliverables/{{ d.id }}/toggle">
+                <button type="submit" class="small">{{ 'Reopen' if d.status == 'done' else 'Mark done' }}</button>
+              </form>
+            </div>
+          </div>
+        </div>
+        {% else %}
+        <p class="empty">No deliverables yet.</p>
+        {% endfor %}
+
+        <h3>Add a deliverable</h3>
+        <form method="post" action="/engagements/{{ engagement.id }}/deliverables">
+          <input type="text" name="title" placeholder="Deliverable title" required />
+          <input type="date" name="due_date" />
+          <textarea name="notes" placeholder="Notes (encrypted)"></textarea>
+          <button type="submit">Add deliverable</button>
+        </form>
+      </section>
+    </div>
+
+    <div class="grid">
+      <section>
+        <h2>Contacts</h2>
+        {% for c in contacts %}
+        <div class="card">
+          <span class="title">{{ c.name }}</span>
+          <div class="sub">
+            {% if c.role %}{{ c.role }}{% endif %}
+            {% if c.email %} · {{ c.email }}{% endif %}
+            {% if c.phone %} · {{ c.phone }}{% endif %}
+          </div>
+        </div>
+        {% else %}
+        <p class="empty">No contacts yet.</p>
+        {% endfor %}
+
+        <h3>Add a contact</h3>
+        <form method="post" action="/engagements/{{ engagement.id }}/contacts">
+          <input type="text" name="name" placeholder="Name" required />
+          <input type="text" name="role" placeholder="Role" />
+          <input type="text" name="email" placeholder="Email" />
+          <input type="text" name="phone" placeholder="Phone" />
+          <button type="submit">Add contact</button>
+        </form>
+      </section>
+
+      <section>
+        <h2>Fees</h2>
+        {% for f in fees %}
+        <div class="card">
+          <span class="title">{{ f.currency }} {{ f.amount }}</span>
+          <div class="sub">
+            <span class="badge {{ f.status }}">{{ f.status }}</span>
+            {% if f.due_date %}Due: {{ f.due_date.strftime('%Y-%m-%d') }}{% endif %}
+            {% if f.notes %} · {{ f.notes }}{% endif %}
+          </div>
+        </div>
+        {% else %}
+        <p class="empty">No fees recorded.</p>
+        {% endfor %}
+      </section>
+    </div>
+
+    <section>
+      <h2>Notes</h2>
+      {% for n in notes %}
+      <div class="card">
+        <div class="sub">{{ n.body }}</div>
+      </div>
+      {% else %}
+      <p class="empty">No notes yet.</p>
+      {% endfor %}
+
+      <h3>Add a note</h3>
+      <form method="post" action="/engagements/{{ engagement.id }}/notes">
+        <textarea name="body" placeholder="Note (encrypted)" required></textarea>
+        <button type="submit">Add note</button>
+      </form>
+    </section>
+
+    {% endif %}
+  </main>
+
+  <script>
+    // Client-side, deliberately: the health badge reflects the live state of
+    // the datastore on every poll, without re-running server-side templating.
+    async function pollHealth() {
+      const badge = document.getElementById("health-badge");
+      try {
+        const res = await fetch("/healthz");
+        const body = await res.json();
+        badge.textContent = body.status;
+        badge.dataset.status = body.status;
+      } catch {
+        badge.textContent = "unreachable";
+        badge.dataset.status = "degraded";
+      }
+    }
+    pollHealth();
+    setInterval(pollHealth, 15000);
+  </script>
+</body>
+</html>

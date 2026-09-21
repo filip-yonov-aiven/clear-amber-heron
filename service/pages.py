@@ -30,6 +30,7 @@ import hashlib
 import hmac
 import logging
 import os
+from datetime import date
 from typing import Any
 from urllib.parse import urlparse
 
@@ -48,313 +49,384 @@ router = APIRouter()
 # third-party crypto.
 # ─────────────────────────────────────────────────────────────────────────────
 
-_PBKDF2_ITERATIONS = 200_000
+
+def _secret(request: Request) -> bytes:
+    """Derive the encryption key from the environment, never from source.
+
+    Prefer an explicit ``APP_ENC_KEY``; fall back to the injected
+    ``DATABASE_URL`` password so the app works out of the box. Either way the
+    key is hashed to a fixed 32-byte value and never stored in a file.
+    """
+    key = os.environ.get("APP_ENC_KEY")
+    if key:
+        return hashlib.sha256(key.encode("utf-8")).digest()
+    parsed = urlparse(request.app.state.settings.database_url)
+    password = parsed.password or "clear-amber-heron"
+    return hashlib.sha256(password.encode("utf-8")).digest()
 
 
-def _secret(request: Request) -> str:
-    """The encryption key material, never written to a file."""
-    env = os.environ.get("APP_ENC_KEY")
-    if env:
-        return env
-    url = request.app.state.settings.database_url
-    password = urlparse(url).password or ""
-    return "clear-amber-heron:" + password
+def _encrypt(secret: bytes, plaintext: Any) -> str:
+    """Encrypt a value into a base64 blob of nonce || mac || ciphertext.
 
-
-def _derive_key(secret: str, salt: bytes) -> bytes:
-    return hashlib.pbkdf2_hmac("sha256", secret.encode("utf-8"), salt, _PBKDF2_ITERATIONS)
-
-
-def _encrypt(secret: str, plaintext: str) -> str:
-    if not plaintext:
-        return ""
-    salt = os.urandom(16)
-    nonce = os.urandom(16)
-    key = _derive_key(secret, salt)
+    ``plaintext`` is coerced to ``str`` first so callers can pass any scalar
+    (a list of notes, a date, a number) without crashing — the value is
+    stringified and then encrypted.
+    """
+    if not isinstance(plaintext, str):
+        plaintext = str(plaintext)
     data = plaintext.encode("utf-8")
+    nonce = os.urandom(16)
     keystream = b""
     counter = 0
     while len(keystream) < len(data):
-        keystream += hashlib.sha256(nonce + counter.to_bytes(8, "big")).digest()
+        keystream += hashlib.sha256(secret + nonce + counter.to_bytes(8, "big")).digest()
         counter += 1
-    cipher = bytes(a ^ b for a, b in zip(data, keystream))
-    tag = hmac.new(key, nonce + cipher, hashlib.sha256).digest()
-    return base64.urlsafe_b64encode(salt + nonce + tag + cipher).decode("ascii")
+    ciphertext = bytes(b ^ k for b, k in zip(data, keystream))
+    mac = hmac.new(secret, nonce + ciphertext, hashlib.sha256).digest()
+    return base64.b64encode(nonce + mac + ciphertext).decode("ascii")
 
 
-def _decrypt(secret: str, blob: str) -> str:
-    if not blob:
-        return ""
+def _decrypt(secret: bytes, blob: str) -> str:
+    """Decrypt a blob written by :func:`_encrypt`. Returns ``""`` on failure."""
     try:
-        raw = base64.urlsafe_b64decode(blob.encode("ascii"))
-        salt, nonce, tag, cipher = raw[:16], raw[16:32], raw[32:64], raw[64:]
-        key = _derive_key(secret, salt)
-        expected = hmac.new(key, nonce + cipher, hashlib.sha256).digest()
-        if not hmac.compare_digest(tag, expected):
+        raw = base64.b64decode(blob)
+        nonce, mac, ciphertext = raw[:16], raw[16:48], raw[48:]
+        expected = hmac.new(secret, nonce + ciphertext, hashlib.sha256).digest()
+        if not hmac.compare_digest(mac, expected):
             return ""
         keystream = b""
         counter = 0
-        while len(keystream) < len(cipher):
-            keystream += hashlib.sha256(nonce + counter.to_bytes(8, "big")).digest()
+        while len(keystream) < len(ciphertext):
+            keystream += hashlib.sha256(secret + nonce + counter.to_bytes(8, "big")).digest()
             counter += 1
-        return bytes(a ^ b for a, b in zip(cipher, keystream)).decode("utf-8", "replace")
+        data = bytes(b ^ k for b, k in zip(ciphertext, keystream))
+        return data.decode("utf-8", errors="replace")
     except Exception:
+        log.exception("decrypt failed")
         return ""
-
-
-def _decrypt_row(secret: str, row: dict[str, Any], fields: list[str]) -> dict[str, Any]:
-    out = dict(row)
-    for f in fields:
-        out[f] = _decrypt(secret, out.get(f) or "")
-    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Database helpers. Every query is wrapped so a datastore hiccup degrades to an
-# empty page instead of a 500; /healthz is what reports the datastore honestly.
+# empty page rather than a 500.
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def _fetch(request: Request, query: str, params: tuple = ()) -> list[dict[str, Any]]:
-    settings = request.app.state.settings
+async def _connect(request: Request) -> psycopg.AsyncConnection:
+    return await psycopg.AsyncConnection.connect(request.app.state.settings.database_url)
+
+
+async def _execute(request: Request, sql: str, params: tuple = ()) -> None:
     try:
-        async with await psycopg.AsyncConnection.connect(settings.database_url) as conn:
+        async with await _connect(request) as conn:
             async with conn.cursor() as cur:
-                await cur.execute(query, params)
-                cols = [d.name for d in cur.description] if cur.description else []
+                await cur.execute(sql, params)
+    except Exception:
+        log.exception("db execute failed")
+
+
+async def _fetch_one(request: Request, sql: str, params: tuple = ()) -> dict | None:
+    try:
+        async with await _connect(request) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, params)
+                row = await cur.fetchone()
+                return dict(row) if row else None
+    except Exception:
+        log.exception("db fetch one failed")
+        return None
+
+
+async def _fetch_all(request: Request, sql: str, params: tuple = ()) -> list[dict]:
+    try:
+        async with await _connect(request) as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(sql, params)
                 rows = await cur.fetchall()
-                return [dict(zip(cols, r)) for r in rows]
-    except Exception as exc:  # noqa: BLE001
-        log.warning("db read failed: %s", exc)
+                return [dict(r) for r in rows]
+    except Exception:
+        log.exception("db fetch all failed")
         return []
 
 
-async def _fetch_one(request: Request, query: str, params: tuple = ()) -> dict[str, Any] | None:
-    rows = await _fetch(request, query, params)
-    return rows[0] if rows else None
-
-
-async def _execute(request: Request, query: str, params: tuple = ()) -> bool:
-    settings = request.app.state.settings
-    try:
-        async with await psycopg.AsyncConnection.connect(settings.database_url) as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(query, params)
-                await conn.commit()
-        return True
-    except Exception as exc:  # noqa: BLE001
-        log.warning("db write failed: %s", exc)
-        return False
-
-
 # ─────────────────────────────────────────────────────────────────────────────
-# Seeding. The schema cannot seed encrypted rows (SQL would write plaintext the
-# app could never read), so on first load — when the engagements table is empty
-# — the app inserts a few realistic engagements through its own encrypt path.
+# Seeding. The schema is applied before the app boots, but no seed rows are
+# written in SQL because that would store plaintext the app could never
+# decrypt. Instead the app seeds a few realistic engagements on first load,
+# through its own encrypt-on-write path.
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 async def _seed(request: Request) -> None:
     secret = _secret(request)
-    samples = [
+    count = await _fetch_one(request, "SELECT COUNT(*) AS n FROM engagements")
+    if count and count["n"]:
+        return
+
+    seeds = [
         {
-            "name": "Acme Corp — Strategic Advisory",
+            "name": "Acme Corp — Strategic Advising",
             "kind": "advising",
             "client": "Acme Corp",
-            "notes": "Renewal due in March. CEO wants a quarterly board deck.",
+            "status": "active",
+            "start_date": date(2024, 1, 15),
+            "end_date": None,
+            "notes": "Monthly strategy calls; focus on market expansion.",
             "calls": [
-                ("recurring", "Weekly strategy call", "weekly", "2025-06-02"),
-                ("adhoc", "Ad-hoc: prep for investor day", "", "2025-05-28"),
-                ("board", "Quarterly board meeting", "quarterly", "2025-06-15"),
+                {
+                    "kind": "recurring",
+                    "title": "Monthly strategy call",
+                    "frequency": "monthly",
+                    "next_due": date(2025, 1, 10),
+                    "status": "scheduled",
+                    "notes": "Prepare Q1 numbers.",
+                },
+                {
+                    "kind": "adhoc",
+                    "title": "Ad-hoc pricing review",
+                    "frequency": None,
+                    "next_due": date(2025, 1, 20),
+                    "status": "scheduled",
+                    "notes": "",
+                },
             ],
             "deliverables": [
-                ("Q3 board deck", "in_progress", "2025-06-10"),
-                ("Competitive landscape memo", "todo", "2025-06-20"),
+                {
+                    "title": "Q1 market analysis",
+                    "status": "in_progress",
+                    "due_date": date(2025, 2, 1),
+                    "notes": "Draft shared with client.",
+                },
             ],
-            "contacts": [("Jane Doe", "CEO", "jane@acme.example", "+1 555 0100")],
-            "fees": [(15000.00, "invoiced", "2025-06-01")],
-            "notes": ["Board deck needs the new pricing model slide."],
+            "contacts": [
+                {"name": "Jane Doe", "role": "CEO", "email": "jane@acme.com", "phone": "+1-555-0100"},
+            ],
+            "fees": [
+                {"amount": 5000, "currency": "USD", "status": "invoiced", "due_date": date(2025, 1, 31), "notes": ""},
+            ],
+            "notes": ["Kickoff went well.", "Client wants more focus on APAC."],
         },
         {
-            "name": "Globex — Board Seat",
+            "name": "Globex — Board Member",
             "kind": "board",
-            "client": "Globex",
-            "notes": "Quarterly cadence, audit committee in Q4.",
+            "client": "Globex Inc.",
+            "status": "active",
+            "start_date": date(2023, 6, 1),
+            "end_date": None,
+            "notes": "Quarterly board meetings; annual governance review.",
             "calls": [
-                ("board", "Quarterly board meeting", "quarterly", "2025-06-20"),
-                ("recurring", "Monthly audit committee call", "monthly", "2025-06-05"),
+                {
+                    "kind": "board",
+                    "title": "Q1 board meeting",
+                    "frequency": "quarterly",
+                    "next_due": date(2025, 3, 15),
+                    "status": "scheduled",
+                    "notes": "Review FY24 results.",
+                },
             ],
             "deliverables": [
-                ("Annual audit review", "todo", "2025-09-30"),
+                {
+                    "title": "Board pack — Q1",
+                    "status": "todo",
+                    "due_date": date(2025, 3, 10),
+                    "notes": "",
+                },
             ],
-            "contacts": [("Sam Rivera", "Board Chair", "sam@globex.example", "+1 555 0111")],
-            "fees": [(25000.00, "paid", "2025-05-15")],
-            "notes": [],
+            "contacts": [
+                {"name": "Sam Lee", "role": "Chair", "email": "sam@globex.com", "phone": "+1-555-0200"},
+            ],
+            "fees": [
+                {"amount": 12000, "currency": "USD", "status": "quoted", "due_date": None, "notes": "Quarterly retainer."},
+            ],
+            "notes": ["Board composition discussion."],
         },
         {
-            "name": "Initech — Consulting",
+            "name": "Nimbus — Consulting Engagement",
             "kind": "consulting",
-            "client": "Initech",
-            "notes": "Short engagement, three deliverables.",
+            "client": "Nimbus Ltd.",
+            "status": "on_hold",
+            "start_date": date(2024, 9, 1),
+            "end_date": None,
+            "notes": "Paused pending budget approval.",
             "calls": [
-                ("recurring", "Weekly working session", "weekly", "2025-05-30"),
+                {
+                    "kind": "recurring",
+                    "title": "Weekly sync",
+                    "frequency": "weekly",
+                    "next_due": date(2025, 1, 8),
+                    "status": "cancelled",
+                    "notes": "",
+                },
             ],
             "deliverables": [
-                ("Process audit", "done", "2025-05-20"),
-                ("Recommendations report", "todo", "2025-06-05"),
+                {
+                    "title": "Process audit report",
+                    "status": "done",
+                    "due_date": date(2024, 12, 15),
+                    "notes": "Delivered.",
+                },
             ],
-            "contacts": [("Pat Lee", "COO", "pat@initech.example", "+1 555 0122")],
-            "fees": [(8000.00, "quoted", "2025-06-15")],
-            "notes": [],
+            "contacts": [
+                {"name": "Alex Kim", "role": "COO", "email": "alex@nimbus.com", "phone": "+1-555-0300"},
+            ],
+            "fees": [
+                {"amount": 8000, "currency": "USD", "status": "paid", "due_date": date(2024, 12, 1), "notes": ""},
+            ],
+            "notes": ["Awaiting budget sign-off."],
         },
     ]
-    for s in samples:
-        await _execute(
-            request,
-            "INSERT INTO engagements (name, kind, client, notes) VALUES (%s, %s, %s, %s) RETURNING id",
-            (
-                _encrypt(secret, s["name"]),
-                s["kind"],
-                _encrypt(secret, s["client"]),
-                _encrypt(secret, s["notes"]),
-            ),
-        )
-        eng = await _fetch_one(
-            request,
-            "SELECT id FROM engagements WHERE name = %s ORDER BY id DESC LIMIT 1",
-            (_encrypt(secret, s["name"]),),
-        )
-        if not eng:
+
+    for s in seeds:
+        eid = await _insert_engagement(request, secret, s)
+        if eid is None:
             continue
-        eid = eng["id"]
-        for kind, title, freq, due in s["calls"]:
+        for c in s["calls"]:
             await _execute(
                 request,
-                "INSERT INTO calls (engagement_id, kind, title, frequency, next_due) VALUES (%s, %s, %s, %s, %s)",
-                (eid, kind, _encrypt(secret, title), freq or None, due or None),
+                "INSERT INTO calls (engagement_id, kind, title, frequency, next_due, status, notes) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                (eid, c["kind"], _encrypt(secret, c["title"]), c["frequency"], c["next_due"], c["status"], _encrypt(secret, c["notes"])),
             )
-        for title, status, due in s["deliverables"]:
+        for d in s["deliverables"]:
             await _execute(
                 request,
-                "INSERT INTO deliverables (engagement_id, title, status, due_date) VALUES (%s, %s, %s, %s)",
-                (eid, _encrypt(secret, title), status, due or None),
+                "INSERT INTO deliverables (engagement_id, title, status, due_date, notes) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (eid, _encrypt(secret, d["title"]), d["status"], d["due_date"], _encrypt(secret, d["notes"])),
             )
-        for name, role, email, phone in s["contacts"]:
+        for c in s["contacts"]:
             await _execute(
                 request,
-                "INSERT INTO contacts (engagement_id, name, role, email, phone) VALUES (%s, %s, %s, %s, %s)",
-                (eid, _encrypt(secret, name), _encrypt(secret, role), _encrypt(secret, email), _encrypt(secret, phone)),
+                "INSERT INTO contacts (engagement_id, name, role, email, phone) "
+                "VALUES (%s, %s, %s, %s, %s)",
+                (eid, _encrypt(secret, c["name"]), _encrypt(secret, c["role"]), _encrypt(secret, c["email"]), _encrypt(secret, c["phone"])),
             )
-        for amount, status, due in s["fees"]:
+        for f in s["fees"]:
             await _execute(
                 request,
-                "INSERT INTO fees (engagement_id, amount, status, due_date) VALUES (%s, %s, %s, %s)",
-                (eid, amount, status, due or None),
+                "INSERT INTO fees (engagement_id, amount, currency, status, due_date, notes) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                (eid, f["amount"], f["currency"], f["status"], f["due_date"], _encrypt(secret, f["notes"])),
             )
-        for body in s["notes"]:
+        for n in s["notes"]:
             await _execute(
                 request,
                 "INSERT INTO notes (engagement_id, body) VALUES (%s, %s)",
-                (eid, _encrypt(secret, body)),
+                (eid, _encrypt(secret, n)),
             )
 
 
+async def _insert_engagement(request: Request, secret: bytes, s: dict) -> int | None:
+    row = await _fetch_one(
+        request,
+        "INSERT INTO engagements (name, kind, client, status, start_date, end_date, notes) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+        (
+            _encrypt(secret, s["name"]),
+            s["kind"],
+            _encrypt(secret, s["client"]),
+            s["status"],
+            s["start_date"],
+            s["end_date"],
+            _encrypt(secret, s["notes"]),
+        ),
+    )
+    return row["id"] if row else None
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# Routes
+# Routes.
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 @router.get("/")
-async def index(request: Request) -> Any:
-    state = request.app.state
+async def index(request: Request):
+    await _seed(request)
     secret = _secret(request)
-
-    count = await _fetch_one(request, "SELECT count(*) AS n FROM engagements")
-    if count and count["n"] == 0:
-        await _seed(request)
-
-    rows = await _fetch(
+    engagements = await _fetch_all(
         request,
-        """
-        SELECT e.id, e.name, e.kind, e.client, e.status, e.start_date, e.end_date,
-               e.notes,
-               (SELECT count(*) FROM calls c
-                 WHERE c.engagement_id = e.id AND c.status <> 'done') AS open_calls,
-               (SELECT count(*) FROM deliverables d
-                 WHERE d.engagement_id = e.id AND d.status <> 'done') AS open_deliverables
-        FROM engagements e
-        ORDER BY e.created_at DESC
-        """,
+        "SELECT id, name, kind, client, status, start_date, end_date, notes FROM engagements ORDER BY created_at",
     )
-    engagements = [_decrypt_row(secret, r, ["name", "client", "notes"]) for r in rows]
+    for e in engagements:
+        e["name"] = _decrypt(secret, e["name"])
+        e["client"] = _decrypt(secret, e["client"])
+        e["notes"] = _decrypt(secret, e["notes"])
 
-    return state.templates.TemplateResponse(
+    engagement = None
+    calls = []
+    deliverables = []
+    contacts = []
+    fees = []
+    notes = []
+
+    eid = request.query_params.get("id")
+    if eid and eid.isdigit():
+        engagement = await _fetch_one(
+            request,
+            "SELECT id, name, kind, client, status, start_date, end_date, notes FROM engagements WHERE id = %s",
+            (int(eid),),
+        )
+        if engagement:
+            engagement["name"] = _decrypt(secret, engagement["name"])
+            engagement["client"] = _decrypt(secret, engagement["client"])
+            engagement["notes"] = _decrypt(secret, engagement["notes"])
+
+            calls = await _fetch_all(
+                request,
+                "SELECT id, kind, title, frequency, next_due, status, notes FROM calls "
+                "WHERE engagement_id = %s ORDER BY next_due NULLS LAST, created_at",
+                (int(eid),),
+            )
+            for c in calls:
+                c["title"] = _decrypt(secret, c["title"])
+                c["notes"] = _decrypt(secret, c["notes"])
+
+            deliverables = await _fetch_all(
+                request,
+                "SELECT id, title, status, due_date, notes FROM deliverables "
+                "WHERE engagement_id = %s ORDER BY due_date NULLS LAST, created_at",
+                (int(eid),),
+            )
+            for d in deliverables:
+                d["title"] = _decrypt(secret, d["title"])
+                d["notes"] = _decrypt(secret, d["notes"])
+
+            contacts = await _fetch_all(
+                request,
+                "SELECT id, name, role, email, phone FROM contacts WHERE engagement_id = %s ORDER BY created_at",
+                (int(eid),),
+            )
+            for c in contacts:
+                c["name"] = _decrypt(secret, c["name"])
+                c["role"] = _decrypt(secret, c["role"])
+                c["email"] = _decrypt(secret, c["email"])
+                c["phone"] = _decrypt(secret, c["phone"])
+
+            fees = await _fetch_all(
+                request,
+                "SELECT id, amount, currency, status, due_date, notes FROM fees "
+                "WHERE engagement_id = %s ORDER BY created_at",
+                (int(eid),),
+            )
+            for f in fees:
+                f["notes"] = _decrypt(secret, f["notes"])
+
+            notes = await _fetch_all(
+                request,
+                "SELECT id, body FROM notes WHERE engagement_id = %s ORDER BY created_at",
+                (int(eid),),
+            )
+            for n in notes:
+                n["body"] = _decrypt(secret, n["body"])
+
+    return request.app.state.templates.TemplateResponse(
         request,
         "index.html",
         {
-            "app_name": state.app_name,
-            "user_intent": state.user_intent,
-            "services": state.services,
-            "view": "dashboard",
+            "app_name": request.app.state.app_name,
+            "user_intent": request.app.state.user_intent,
             "engagements": engagements,
-        },
-    )
-
-
-@router.get("/engagements/{engagement_id}")
-async def engagement_detail(request: Request, engagement_id: int) -> Any:
-    state = request.app.state
-    secret = _secret(request)
-
-    eng = await _fetch_one(request, "SELECT * FROM engagements WHERE id = %s", (engagement_id,))
-    if not eng:
-        return RedirectResponse("/", status_code=303)
-    eng = _decrypt_row(secret, eng, ["name", "client", "notes"])
-
-    calls = await _fetch(
-        request,
-        "SELECT * FROM calls WHERE engagement_id = %s ORDER BY next_due NULLS LAST, created_at DESC",
-        (engagement_id,),
-    )
-    calls = [_decrypt_row(secret, r, ["title", "notes"]) for r in calls]
-
-    deliverables = await _fetch(
-        request,
-        "SELECT * FROM deliverables WHERE engagement_id = %s ORDER BY due_date NULLS LAST, created_at DESC",
-        (engagement_id,),
-    )
-    deliverables = [_decrypt_row(secret, r, ["title", "notes"]) for r in deliverables]
-
-    contacts = await _fetch(
-        request,
-        "SELECT * FROM contacts WHERE engagement_id = %s ORDER BY created_at DESC",
-        (engagement_id,),
-    )
-    contacts = [_decrypt_row(secret, r, ["name", "role", "email", "phone"]) for r in contacts]
-
-    fees = await _fetch(
-        request,
-        "SELECT * FROM fees WHERE engagement_id = %s ORDER BY due_date NULLS LAST, created_at DESC",
-        (engagement_id,),
-    )
-    fees = [_decrypt_row(secret, r, ["notes"]) for r in fees]
-
-    notes = await _fetch(
-        request,
-        "SELECT * FROM notes WHERE engagement_id = %s ORDER BY created_at DESC",
-        (engagement_id,),
-    )
-    notes = [_decrypt_row(secret, r, ["body"]) for r in notes]
-
-    return state.templates.TemplateResponse(
-        request,
-        "index.html",
-        {
-            "app_name": state.app_name,
-            "user_intent": state.user_intent,
-            "services": state.services,
-            "view": "detail",
-            "engagement": eng,
+            "engagement": engagement,
             "calls": calls,
             "deliverables": deliverables,
             "contacts": contacts,
@@ -369,16 +441,29 @@ async def create_engagement(
     request: Request,
     name: str = Form(...),
     kind: str = Form(...),
-    client: str = Form(""),
+    client: str = Form(...),
+    status: str = Form("active"),
+    start_date: str = Form(""),
+    end_date: str = Form(""),
     notes: str = Form(""),
 ) -> RedirectResponse:
     secret = _secret(request)
-    await _execute(
+    row = await _fetch_one(
         request,
-        "INSERT INTO engagements (name, kind, client, notes) VALUES (%s, %s, %s, %s)",
-        (_encrypt(secret, name), kind, _encrypt(secret, client), _encrypt(secret, notes)),
+        "INSERT INTO engagements (name, kind, client, status, start_date, end_date, notes) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id",
+        (
+            _encrypt(secret, name),
+            kind,
+            _encrypt(secret, client),
+            status,
+            start_date or None,
+            end_date or None,
+            _encrypt(secret, notes),
+        ),
     )
-    return RedirectResponse("/", status_code=303)
+    eid = row["id"] if row else None
+    return RedirectResponse(f"/?id={eid}" if eid else "/", status_code=303)
 
 
 @router.post("/engagements/{engagement_id}/calls")
@@ -389,15 +474,17 @@ async def add_call(
     title: str = Form(...),
     frequency: str = Form(""),
     next_due: str = Form(""),
+    status: str = Form("scheduled"),
     notes: str = Form(""),
 ) -> RedirectResponse:
     secret = _secret(request)
     await _execute(
         request,
-        "INSERT INTO calls (engagement_id, kind, title, frequency, next_due, notes) VALUES (%s, %s, %s, %s, %s, %s)",
-        (engagement_id, kind, _encrypt(secret, title), frequency or None, next_due or None, _encrypt(secret, notes)),
+        "INSERT INTO calls (engagement_id, kind, title, frequency, next_due, status, notes) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s)",
+        (engagement_id, kind, _encrypt(secret, title), frequency or None, next_due or None, status, _encrypt(secret, notes)),
     )
-    return RedirectResponse(f"/engagements/{engagement_id}", status_code=303)
+    return RedirectResponse(f"/?id={engagement_id}", status_code=303)
 
 
 @router.post("/engagements/{engagement_id}/deliverables")
@@ -405,16 +492,18 @@ async def add_deliverable(
     request: Request,
     engagement_id: int,
     title: str = Form(...),
+    status: str = Form("todo"),
     due_date: str = Form(""),
     notes: str = Form(""),
 ) -> RedirectResponse:
     secret = _secret(request)
     await _execute(
         request,
-        "INSERT INTO deliverables (engagement_id, title, due_date, notes) VALUES (%s, %s, %s, %s)",
-        (engagement_id, _encrypt(secret, title), due_date or None, _encrypt(secret, notes)),
+        "INSERT INTO deliverables (engagement_id, title, status, due_date, notes) "
+        "VALUES (%s, %s, %s, %s, %s)",
+        (engagement_id, _encrypt(secret, title), status, due_date or None, _encrypt(secret, notes)),
     )
-    return RedirectResponse(f"/engagements/{engagement_id}", status_code=303)
+    return RedirectResponse(f"/?id={engagement_id}", status_code=303)
 
 
 @router.post("/engagements/{engagement_id}/contacts")
@@ -432,7 +521,27 @@ async def add_contact(
         "INSERT INTO contacts (engagement_id, name, role, email, phone) VALUES (%s, %s, %s, %s, %s)",
         (engagement_id, _encrypt(secret, name), _encrypt(secret, role), _encrypt(secret, email), _encrypt(secret, phone)),
     )
-    return RedirectResponse(f"/engagements/{engagement_id}", status_code=303)
+    return RedirectResponse(f"/?id={engagement_id}", status_code=303)
+
+
+@router.post("/engagements/{engagement_id}/fees")
+async def add_fee(
+    request: Request,
+    engagement_id: int,
+    amount: float = Form(...),
+    currency: str = Form("USD"),
+    status: str = Form("quoted"),
+    due_date: str = Form(""),
+    notes: str = Form(""),
+) -> RedirectResponse:
+    secret = _secret(request)
+    await _execute(
+        request,
+        "INSERT INTO fees (engagement_id, amount, currency, status, due_date, notes) "
+        "VALUES (%s, %s, %s, %s, %s, %s)",
+        (engagement_id, amount, currency, status, due_date or None, _encrypt(secret, notes)),
+    )
+    return RedirectResponse(f"/?id={engagement_id}", status_code=303)
 
 
 @router.post("/engagements/{engagement_id}/notes")
@@ -443,7 +552,7 @@ async def add_note(request: Request, engagement_id: int, body: str = Form(...)) 
         "INSERT INTO notes (engagement_id, body) VALUES (%s, %s)",
         (engagement_id, _encrypt(secret, body)),
     )
-    return RedirectResponse(f"/engagements/{engagement_id}", status_code=303)
+    return RedirectResponse(f"/?id={engagement_id}", status_code=303)
 
 
 @router.post("/calls/{call_id}/toggle")
@@ -455,7 +564,7 @@ async def toggle_call(request: Request, call_id: int) -> RedirectResponse:
         (call_id,),
     )
     eid = row["engagement_id"] if row else None
-    return RedirectResponse(f"/engagements/{eid}" if eid else "/", status_code=303)
+    return RedirectResponse(f"/?id={eid}" if eid else "/", status_code=303)
 
 
 @router.post("/deliverables/{deliverable_id}/toggle")
@@ -467,7 +576,7 @@ async def toggle_deliverable(request: Request, deliverable_id: int) -> RedirectR
         (deliverable_id,),
     )
     eid = row["engagement_id"] if row else None
-    return RedirectResponse(f"/engagements/{eid}" if eid else "/", status_code=303)
+    return RedirectResponse(f"/?id={eid}" if eid else "/", status_code=303)
 
 
 @router.post("/engagements/{engagement_id}/wipe")

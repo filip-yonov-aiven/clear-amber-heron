@@ -22,4 +22,4 @@ bookkeeping about a build; this is the process that is serving requests telling 
 which source it was built from.
 """
 
-REVISION = "96758f0d929e"
+REVISION = "5b78afe5c92c"
